@@ -1,0 +1,283 @@
+## Loading required libraries
+```{r}
+library(ggplot2)
+library(ggmap)
+library(shiny)
+library(leaflet)
+library(leaflet.extras)
+library(dplyr)
+library(osrm)
+library(leaflet.minicharts)
+```
+## Read the data from file
+## Please make sure the files are in the /FD0x/place_visit_data folder that in the same directory with this code 
+```{r}
+# Read GLH data for FD01
+# Read and preprocess the data files
+data_FD01 <- read.csv("/FD01/place_visit_data/FD01_place_visit.csv")
+data_FD01 <- data_FD01 %>%
+  # Filter based on visit_confidence, drop all places with less than 50 percent confidence
+  filter(visit_confidence >= 50) %>%  
+  # Select only the first 6 columns for the visualization only
+  select(1:6) %>%                    
+  mutate(
+    visit_order = seq_len(nrow(.)),
+    # Add jitter to avoid overlap
+    latitude = jitter(latitude, factor = 0.1),
+    longitude = jitter(longitude, factor = 0.1)
+  )
+
+# Read GLH data for FD02
+data_FD02 <- read.csv("/FD02/place_visit_data/FD02_place_visit.csv")
+data_FD02 <- data_FD02 %>%
+  # Filter based on visit_confidence, drop all places with less than 50 percent confidence
+  filter(visit_confidence >= 50) %>%
+  # Select only the first 6 columns for the visualization only
+  select(1:6) %>%
+  mutate(
+    visit_order = seq_len(nrow(.)),
+    # Add jitter to avoid overlap
+    latitude = jitter(latitude, factor = 0.1),
+    longitude = jitter(longitude, factor = 0.1)
+  )
+```
+## Please runthe UI-Server Part for Slider-bar and Clusterer Markers seperately
+## Only one app shows at each time
+
+## Slider-bar Visualization
+## Define the UI for the APP
+```{r}
+# Define UI for the Shiny app
+ui <- fluidPage(
+  titlePanel("Google Location History Viewer"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput("visit_count_FD01", "Show locations up to (FD01):", 
+                  min = 2, max = nrow(data_FD01), value = 2, step = 1, animate = TRUE),
+      sliderInput("visit_count_FD02", "Show locations up to (FD02):", 
+                  min = 2, max = nrow(data_FD02), value = 2, step = 1, animate = TRUE)
+    ),
+    mainPanel(
+      leafletOutput("map")
+    )
+  )
+)
+```
+## Define the server for the APP
+```{r}
+# Define the server for the app
+server <- function(input, output, session) {
+  # Render the initial map
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      addLegend(
+        position = "bottomright",
+        colors = c("blue", "green", "red"),
+        labels = c("FD01 Places", "FD02 Places", "Movement Path"),
+        title = "Google Location History"
+      )
+  })
+  
+  # Observe changes for FD01
+  observe({
+    # Filter the data based on the slider value for FD01
+    filtered_data_FD01 <- data_FD01[1:input$visit_count_FD01, ] %>%
+      filter(!is.na(latitude), !is.na(longitude), !is.na(place_name))
+    
+    # Prepare arrow data for FD01 if there are enough rows
+    if (nrow(filtered_data_FD01) > 1) {
+      arrow_data_FD01 <- data.frame(
+        from_lat = head(filtered_data_FD01$latitude, -1),
+        from_lon = head(filtered_data_FD01$longitude, -1),
+        to_lat = tail(filtered_data_FD01$latitude, -1),
+        to_lon = tail(filtered_data_FD01$longitude, -1)
+      )
+    } else {
+      arrow_data_FD01 <- NULL
+    }
+    
+    # Update the map for FD01
+    leafletProxy("map", data = filtered_data_FD01) %>%
+      clearMarkers() %>%
+      clearShapes() %>%
+      addCircleMarkers(
+        ~longitude, ~latitude,
+        color = "blue", radius = 4,
+        label = ~paste(place_name, "<br>Order:", visit_order),
+        labelOptions = labelOptions(noHide = FALSE)
+      )
+    
+    # Add directional arrows for FD01 if valid
+    if (!is.null(arrow_data_FD01)) {
+      leafletProxy("map") %>%
+        addFlows(
+          arrow_data_FD01$from_lon, arrow_data_FD01$from_lat,
+          arrow_data_FD01$to_lon, arrow_data_FD01$to_lat,
+          color = "red", opacity = 0.8, maxFlow = 10
+        )
+    }
+  })
+  
+  # Observe changes for FD02
+  observe({
+    # Filter the data based on the slider value for FD02
+    filtered_data_FD02 <- data_FD02[1:input$visit_count_FD02, ] %>%
+      filter(!is.na(latitude), !is.na(longitude), !is.na(place_name))
+    
+    # Prepare arrow data for FD02 if there are enough rows
+    if (nrow(filtered_data_FD02) > 1) {
+      arrow_data_FD02 <- data.frame(
+        from_lat = head(filtered_data_FD02$latitude, -1),
+        from_lon = head(filtered_data_FD02$longitude, -1),
+        to_lat = tail(filtered_data_FD02$latitude, -1),
+        to_lon = tail(filtered_data_FD02$longitude, -1)
+      )
+    } else {
+      arrow_data_FD02 <- NULL
+    }
+    
+    # Update the map for FD02
+    leafletProxy("map", data = filtered_data_FD02) %>%
+      clearMarkers() %>%
+      clearShapes() %>%
+      addCircleMarkers(
+        ~longitude, ~latitude,
+        color = "green", radius = 4,
+        label = ~paste(place_name, "<br>Order:", visit_order),
+        labelOptions = labelOptions(noHide = FALSE)
+      )
+    
+    # Add directional arrows for FD02 if valid
+    if (!is.null(arrow_data_FD02)) {
+      leafletProxy("map") %>%
+        addFlows(
+          arrow_data_FD02$from_lon, arrow_data_FD02$from_lat,
+          arrow_data_FD02$to_lon, arrow_data_FD02$to_lat,
+          color = "red", opacity = 0.8, maxFlow = 10
+        )
+    }
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
+```
+
+## Clustered Marker Visualization with Top 5 most visited place displayed, including FD01, FD02, and data for FD02 for March 2020 to December 2020 during the Covid-19 lockdown
+## Define the UI for the APP
+```{r}
+ui <- fluidPage(
+  titlePanel("Google Location History Visualization"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h3("Clustered Markers Visualization"),
+      p("This map shows clustered markers for two datasets (FD01 and FD02) with additional data for FD01 (March 2020 - December 2020)."),
+      
+      h4("Top 5 Most Visited Places"),
+      
+      h5("FD01:"),
+      tableOutput("top_places_FD01"),
+      
+      h5("FD02:"),
+      tableOutput("top_places_FD02"),
+      
+      h5("FD01 (March 2020 - December 2020):"),
+      tableOutput("top_places_FD01_MarDec2020")
+    ),
+    
+    mainPanel(
+      leafletOutput("map", height = 600)  # Map output
+    )
+  )
+)
+```
+## Define the server for the APP
+```{r}
+server <- function(input, output, session) {
+  # Filter FD01 data for March 2020 to December 2020
+  data_FD01_MarDec2020 <- data_FD01 %>%
+    filter(
+      as.Date(start_time) >= as.Date("2020-03-01") & 
+      as.Date(start_time) <= as.Date("2020-12-31")
+    )
+  
+  # Top 5 most visited places for FD01
+  output$top_places_FD01 <- renderTable({
+    data_FD01 %>%
+      group_by(place_name) %>%
+      summarise(visits = n()) %>%
+      arrange(desc(visits)) %>%
+      slice_head(n = 5)  # Top 5 places
+  }, rownames = TRUE)
+  
+  # Top 5 most visited places for FD02
+  output$top_places_FD02 <- renderTable({
+    data_FD02 %>%
+      group_by(place_name) %>%
+      summarise(visits = n()) %>%
+      arrange(desc(visits)) %>%
+      slice_head(n = 5)  # Top 5 places
+  }, rownames = TRUE)
+  
+  # Top 5 most visited places for FD01 (March 2020 - December 2020)
+  output$top_places_FD01_MarDec2020 <- renderTable({
+    data_FD01_MarDec2020 %>%
+      group_by(place_name) %>%
+      summarise(visits = n()) %>%
+      arrange(desc(visits)) %>%
+      slice_head(n = 5)  # Top 5 places
+  }, rownames = TRUE)
+  
+  # Render the map with clustered markers
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      
+      # FD01 Markers
+      addMarkers(
+        data = data_FD01,
+        lng = ~longitude, lat = ~latitude,
+        popup = ~paste("<b>Place Name:</b>", place_name, "<br><b>Visit Order:</b>", visit_order),
+        clusterOptions = markerClusterOptions(),
+        group = "FD01"
+      ) %>%
+      
+      # FD02 Markers
+      addMarkers(
+        data = data_FD02,
+        lng = ~longitude, lat = ~latitude,
+        popup = ~paste("<b>Place Name:</b>", place_name, "<br><b>Visit Order:</b>", visit_order),
+        clusterOptions = markerClusterOptions(),
+        group = "FD02"
+      ) %>%
+      
+      # FD01 Markers (March 2020 - December 2020)
+      addMarkers(
+        data = data_FD01_MarDec2020,
+        lng = ~longitude, lat = ~latitude,
+        popup = ~paste("<b>Place Name:</b>", place_name, "<br><b>Visit Order:</b>", visit_order),
+        clusterOptions = markerClusterOptions(),
+        group = "FD01 (Mar-Dec 2020)"
+      ) %>%
+      
+      # Add layer control to switch between FD01, FD02, and FD02 (March-Dec 2020)
+      addLayersControl(
+        overlayGroups = c("FD01", "FD02", "FD01 (Mar-Dec 2020)"),
+        options = layersControlOptions(collapsed = FALSE)
+      ) %>%
+      
+      # Add legends
+      addLegend(
+        position = "bottomright",
+        colors = c("blue", "green", "orange"),
+        labels = c("FD01 Points", "FD02 Points", "FD01 (Mar-Dec 2020)"),
+        title = "Legend"
+      )
+  })
+}
+
+# Run the app
+shinyApp(ui = ui, server = server)
+```
