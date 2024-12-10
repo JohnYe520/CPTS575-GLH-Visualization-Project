@@ -17,7 +17,7 @@ We handle each dataset as 3 parts:
 We wrote codes in 4 .rmd files to handle the 3 parts, 1 for Records.json, 1 for Activity Segment Data, and 2 for Places Visit Data.
 
 - Records.json: Minzhang Li handled it in **HandleRecords.Rmd**, which should be placed in the same location as folders **FD0X**. Please follow the instructions in the file to use it. We convert Records.json to .csv file, clean the data, do the visualization and try exploratory analysis.
-- Activity Segment Data: Minzhang Li handled the Year_Month.json files in **ActivitySegmentData_MonthData_All_In_One.Rmd**, which should also be placed in the same location as folders **FD0X**.. Please follow the instructions in the file to use it. We convert Year_Month.json files to .csv file, clean the data, do the visualization and try exploratory analysis.
+- Activity Segment Data: Minzhang Li handled the Year_Month.json files in **ActivitySegmentData_MonthData_All_In_One.Rmd**, which should also be placed in the same location as folders **FD0X**. Please follow the instructions in the file to use it. We convert Year_Month.json files to .csv file, clean the data, do the visualization and try exploratory analysis.
 - Places Visit Data:
   - Tianhao Ye completed this part.
   - The below 2 .rmd files should be placed in the same directory with place_visit_month folder.
