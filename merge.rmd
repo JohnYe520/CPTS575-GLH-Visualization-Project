@@ -33,6 +33,6 @@ csv_files <- list.files(path = file_path, pattern = "_place_visit.csv$", full.na
 # Read and combine all CSV files into a single data frame
 combined_data <- do.call(rbind, lapply(csv_files, read.csv))
 
-# Optionally, save the combined data to a new CSV
+# Save the combined data to a new CSV
 write.csv(combined_data, file = file.path(file_path, "FD02_place_visit.csv"), row.names = FALSE)
 ```
