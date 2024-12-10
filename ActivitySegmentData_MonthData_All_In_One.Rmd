@@ -1,0 +1,700 @@
+---
+title: "475-575_FinalProject_MonthData_FD01"
+author: "Minzhang"
+date: "2024-10-26"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+This is our code for handling Activity Segment Data from Month Dataset of FD01 and FD02.
+
+# File Location
+
+```{r}
+# Put this .rmd file in the same folder with unziped FD01 and FD02
+# You can change these variables based on your file location and structure
+# To generate one by one
+
+# Name = "FD01"
+Name = "FD02"
+
+DataYear = "2016"
+DataMonth = "DECEMBER"
+
+OurFilePath = paste(Name,"/Takeout/Location History/Semantic Location History/", sep="")
+NewCSVFilePath = paste(OurFilePath, "Activity_CSVFile", sep="")
+NewTidyCSVFilePath = paste(OurFilePath, "Activity_CleanedCSVFile", sep="")
+
+
+if (!dir.exists(NewCSVFilePath)){
+  dir.create(NewCSVFilePath)
+}
+if (!dir.create(NewTidyCSVFilePath)){
+  dir.create(NewTidyCSVFilePath)
+}
+
+```
+
+# Step 1: Convert from JSON to CSV
+
+For some special cases without some elements, we add the `safe_extract` to set them as `NA`.
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(purrr)
+
+# Read JSON data
+json_data <- fromJSON(paste(OurFilePath, DataYear, "/", DataYear, "_", DataMonth, ".json", sep = ""), flatten = TRUE)
+
+# Extract timelineObjects
+timelineObjects <- json_data$timelineObjects
+
+# Define a helper function to safely extract fields
+safe_extract <- function(data, field, default_value = NA) {
+  if (field %in% names(data)) {
+    return(data[[field]])
+  } else {
+    return(default_value)
+  }
+}
+
+# Handle the case for activitySegment
+if ("activitySegment.startLocation.latitudeE7" %in% colnames(timelineObjects)) {
+  
+  activity_data <- timelineObjects %>%
+    filter(!is.na(safe_extract(., "activitySegment.startLocation.latitudeE7"))) %>%
+    mutate(
+      UserName = Name,
+      start_latitude = safe_extract(., "activitySegment.startLocation.latitudeE7", NA_real_) / 1e7,
+      start_longitude = safe_extract(., "activitySegment.startLocation.longitudeE7", NA_real_) / 1e7,
+      end_latitude = safe_extract(., "activitySegment.endLocation.latitudeE7", NA_real_) / 1e7,
+      end_longitude = safe_extract(., "activitySegment.endLocation.longitudeE7", NA_real_) / 1e7,
+      start_time = safe_extract(., "activitySegment.duration.startTimestamp", NA_character_),
+      end_time = safe_extract(., "activitySegment.duration.endTimestamp", NA_character_),
+      activity_type = safe_extract(., "activitySegment.activityType", NA_character_),
+      distance = safe_extract(., "activitySegment.distance", NA_real_),
+      confidence = safe_extract(., "activitySegment.confidence", NA_character_),
+      # Handle waypointPath if it exists
+      # Handle waypointPath if it exists
+      waypoints = if ("activitySegment.waypointPath.waypoints" %in% colnames(timelineObjects)) {
+      map_chr(activitySegment.waypointPath.waypoints, function(wp) {
+        if (!is.null(wp)) {
+          paste(paste(wp$latE7 / 1e7, wp$lngE7 / 1e7, sep = ", "), collapse = " | ")
+        } else {
+          NA_character_
+        }
+      })
+    } else {
+      NA_character_
+    },
+      parking_latitude = safe_extract(., "activitySegment.parkingEvent.location.latitudeE7", NA_real_) / 1e7,
+      parking_longitude = safe_extract(., "activitySegment.parkingEvent.location.longitudeE7", NA_real_) / 1e7,
+      parking_accuracy = safe_extract(., "activitySegment.parkingEvent.location.accuracyMetres", NA_real_),
+      parking_time = safe_extract(., "activitySegment.parkingEvent.timestamp", NA_character_)
+    ) %>%
+    select(UserName, start_latitude, start_longitude, end_latitude, end_longitude, start_time, end_time, activity_type, distance, confidence, waypoints, parking_latitude, parking_longitude, parking_accuracy, parking_time)
+
+  # Write the extracted data to a CSV file
+  write.csv(activity_data, paste(OurFilePath, "Activity_CSVFile/", "activity_segment_data_", Name, "_", DataYear, "_", DataMonth, ".csv", sep = ""), row.names = FALSE)
+  print(paste("Extracted", nrow(activity_data), "activity segments to activity_segment_data.csv"))
+  
+} else {
+  print("No activitySegment found.")
+}
+
+
+```
+
+# Step 2: Tidy Data
+
+```{r}
+library(dplyr)
+library(geosphere)
+library(lubridate)
+
+data <- read.csv(paste(OurFilePath, "Activity_CSVFile/", "activity_segment_data_", Name, "_", DataYear, "_", DataMonth, ".csv", sep=""), stringsAsFactors = FALSE)
+
+data <- data %>%
+  mutate(
+    start_time_temp = ymd_hms(start_time),
+    end_time_temp = ymd_hms(end_time)
+  )
+
+valid_data <- data %>% filter(!confidence %in% c("LOW", "UNKNOWN"))
+lat_min <- min(c(valid_data$start_latitude, valid_data$end_latitude), na.rm = TRUE)
+lat_max <- max(c(valid_data$start_latitude, valid_data$end_latitude), na.rm = TRUE)
+lon_min <- min(c(valid_data$start_longitude, valid_data$end_longitude), na.rm = TRUE)
+lon_max <- max(c(valid_data$start_longitude, valid_data$end_longitude), na.rm = TRUE)
+
+data <- data %>%
+  mutate(
+    is_out_of_range = (
+      (start_latitude < lat_min | start_latitude > lat_max |
+       start_longitude < lon_min | start_longitude > lon_max) |
+      (end_latitude < lat_min | end_latitude > lat_max |
+       end_longitude < lon_min | end_longitude > lon_max)
+    )
+  )
+
+data <- data %>%
+  mutate(
+    parking_correction = FALSE,
+    was_modified = FALSE,
+    to_delete = FALSE
+  )
+
+# repair parking
+data <- data %>%
+  rowwise() %>%
+  mutate(
+    parking_distance = ifelse(
+      !is.na(parking_latitude) & !is.na(parking_longitude) &
+      !is.na(end_latitude) & !is.na(end_longitude),
+      distHaversine(
+        c(parking_longitude, parking_latitude),
+        c(end_longitude, end_latitude)
+      ),
+      NA_real_
+    ),
+    parking_latitude = ifelse(
+      parking_accuracy < 50 & (!is.na(parking_distance) & parking_distance > 100),
+      {
+        parking_correction <- TRUE
+        end_latitude
+      },
+      parking_latitude
+    ),
+    parking_longitude = ifelse(
+      parking_accuracy < 50 & (!is.na(parking_distance) & parking_distance > 100),
+      {
+        parking_correction <- TRUE
+        end_longitude
+      },
+      parking_longitude
+    )
+  ) %>%
+  mutate(
+    parking_correction = parking_correction | (parking_accuracy < 50 & (!is.na(parking_distance) & parking_distance > 500))
+  ) %>%
+  ungroup()
+
+
+data <- data %>%
+  mutate(
+    need_fix = confidence %in% c("LOW", "UNKNOWN") & is_out_of_range
+  )
+
+data$waypoints[data$need_fix] <- NA
+
+data$was_modified[data$need_fix] <- TRUE
+
+idx_parking <- which(data$need_fix & !is.na(data$parking_accuracy) & data$parking_accuracy >= 50)
+data$start_latitude[idx_parking] <- data$parking_latitude[idx_parking]
+data$start_longitude[idx_parking] <- data$parking_longitude[idx_parking]
+data$end_latitude[idx_parking] <- data$parking_latitude[idx_parking]
+data$end_longitude[idx_parking] <- data$parking_longitude[idx_parking]
+
+data$was_modified[idx_parking] <- TRUE
+
+idx_no_parking <- which(data$need_fix & is.na(data$parking_latitude))
+
+data <- data %>%
+  arrange(start_time_temp) %>%
+  mutate(
+    prev_end_time = lag(end_time_temp),
+    next_start_time = lead(start_time_temp),
+    time_diff_prev = as.numeric(difftime(start_time_temp, prev_end_time, units = "mins")),
+    time_diff_next = as.numeric(difftime(next_start_time, end_time_temp, units = "mins"))
+  )
+
+for (i in idx_no_parking) {
+  if (!is.na(data$time_diff_prev[i]) && data$time_diff_prev[i] <= 10) {
+    data$start_latitude[i] <- data$end_latitude[i - 1]
+    data$start_longitude[i] <- data$end_longitude[i - 1]
+    data$was_modified[i] <- TRUE
+  }
+  
+  if (!is.na(data$time_diff_next[i]) && data$time_diff_next[i] <= 10) {
+    data$end_latitude[i] <- data$start_latitude[i + 1]
+    data$end_longitude[i] <- data$start_longitude[i + 1]
+    data$was_modified[i] <- TRUE
+  }
+}
+
+data <- data %>%
+  mutate(to_delete = need_fix & !was_modified) %>%
+  filter(!to_delete)
+
+modified_indices <- which(data$was_modified)
+data$parking_latitude[modified_indices] <- data$start_latitude[modified_indices]
+data$parking_longitude[modified_indices] <- data$start_longitude[modified_indices]
+
+data <- data %>%
+  select(-start_time_temp, -end_time_temp, -is_out_of_range, -to_delete,
+         -prev_end_time, -next_start_time, -time_diff_prev, -time_diff_next, -need_fix)
+
+write.csv(data, paste(OurFilePath, "Activity_CleanedCSVFile/", "activity_segment_data_", Name, "_", DataYear, "_", DataMonth, ".csv", sep=""), row.names = FALSE)
+
+cat("Tidy finished. Modified records are marked in 'was_modified'.\n")
+
+
+```
+
+# Step 3: Join
+
+```{r}
+library(dplyr)
+
+file_path <- paste(OurFilePath, "Activity_CleanedCSVFile", sep="")
+
+file_list <- list.files(path = file_path, pattern = "*.csv", full.names = TRUE)
+
+combined_data <- file_list %>%
+  lapply(read.csv) %>%
+  bind_rows()
+
+head(combined_data)
+
+write.csv(combined_data, file = paste(OurFilePath, "Activity_CleanedCSVFile/", "Activity_All_In_One.csv", sep=""), row.names = FALSE)
+
+```
+
+# Step 4: Visualization
+
+## 4.1 Static Visualization
+
+```{r}
+library(dplyr)
+library(leaflet)
+library(lubridate)
+library(stringr)
+
+data <- read.csv(paste(OurFilePath, "Activity_CleanedCSVFile/", "Activity_All_In_One.csv", sep=""), stringsAsFactors = FALSE)
+
+data <- data %>%
+  mutate(
+    start_time = ymd_hms(start_time),
+    end_time = ymd_hms(end_time)
+  )
+
+# handle waypoints
+parse_waypoints <- function(waypoint_str) {
+  if (is.na(waypoint_str) || waypoint_str == "") {
+    return(NULL)
+  } else {
+    points <- str_split(waypoint_str, " \\| ")[[1]]
+    coords <- lapply(points, function(point) {
+      lat_lng <- str_split(point, ", ")[[1]]
+      lat <- as.numeric(lat_lng[1])
+      lng <- as.numeric(lat_lng[2])
+      return(c(lat, lng))
+    })
+    return(do.call(rbind, coords))
+  }
+}
+
+data$waypoints_parsed <- lapply(data$waypoints, parse_waypoints)
+
+m <- leaflet() %>%
+  addTiles()
+
+activity_colors <- c(
+  "IN_PASSENGER_VEHICLE" = "blue",
+  "WALKING" = "green",
+  "IN_BUS" = "red",
+  "DRIVING" = "purple",
+  "BICYCLING" = "orange"
+)
+
+data$color <- activity_colors[data$activity_type]
+data$color[is.na(data$color)] <- "gray"
+
+for (i in 1:nrow(data)) {
+  row <- data[i, ]
+  
+  start_point <- c(row$start_latitude, row$start_longitude)
+  end_point <- c(row$end_latitude, row$end_longitude)
+
+  popup_info <- paste0(
+    "<b>Activity Type:</b> ", row$activity_type, "<br>",
+    "<b>Start Time:</b> ", row$start_time, "<br>",
+    "<b>End Time:</b> ", row$end_time, "<br>",
+    "<b>Distance:</b> ", row$distance, " meters<br>",
+    "<b>Confidence:</b> ", row$confidence, "<br>",
+    "<b>Was Modified:</b> ", row$was_modified
+  )
+  
+  if (!is.null(row$waypoints_parsed[[1]])) {
+    waypoints <- row$waypoints_parsed[[1]]
+    path_coords <- rbind(start_point, waypoints, end_point)
+  } else {
+    path_coords <- rbind(start_point, end_point)
+  }
+  
+  m <- m %>%
+    addPolylines(
+      lng = path_coords[,2],
+      lat = path_coords[,1],
+      color = row$color,
+      weight = 4,
+      opacity = 0.7,
+      popup = popup_info
+    )
+  
+  m <- m %>%
+    addCircleMarkers(
+      lng = start_point[2],
+      lat = start_point[1],
+      radius = 5,
+      color = "blue",
+      fill = TRUE,
+      fillOpacity = 0.7,
+      popup = paste0("<b>Start Point</b><br>", popup_info)
+    )
+  
+  m <- m %>%
+    addCircleMarkers(
+      lng = end_point[2],
+      lat = end_point[1],
+      radius = 5,
+      color = "red",
+      fill = TRUE,
+      fillOpacity = 0.7,
+      popup = paste0("<b>End Point</b><br>", popup_info)
+    )
+  
+  if (!is.na(row$parking_latitude) && !is.na(row$parking_longitude)) {
+    m <- m %>%
+      addCircleMarkers(
+        lng = row$parking_longitude,
+        lat = row$parking_latitude,
+        radius = 4,
+        color = "orange",
+        fill = TRUE,
+        fillOpacity = 0.5,
+        popup = paste0(
+          "<b>Parking Location</b><br>",
+          "<b>Parking Time:</b> ", row$parking_time, "<br>",
+          "<b>Accuracy:</b> ", row$parking_accuracy, " meters"
+        )
+      )
+  }
+}
+
+m <- m %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("blue", "green", "red", "purple", "orange", "gray"),
+    labels = c("In Passenger Vehicle", "Walking", "In Bus", "Driving", "Bicycling", "Other"),
+    title = "Activity Type",
+    opacity = 0.7
+  )
+
+m
+
+
+```
+
+## 4.2 Dynamic Visualization
+
+```{r}
+library(shiny)
+library(dplyr)
+library(leaflet)
+library(lubridate)
+library(stringr)
+
+data <- read.csv(paste(OurFilePath, "Activity_CleanedCSVFile/", "Activity_All_In_One.csv", sep=""), stringsAsFactors = FALSE)
+
+data <- data %>%
+  mutate(
+    start_time = as.POSIXct(start_time, format = "%Y-%m-%dT%H:%M:%OSZ", tz = "UTC"),
+    end_time = as.POSIXct(end_time, format = "%Y-%m-%dT%H:%M:%OSZ", tz = "UTC")
+  )
+
+if (any(is.na(data$start_time)) || any(is.na(data$end_time))) {
+  stop("Please check time format, meet some error when handling it.")
+}
+
+parse_waypoints <- function(waypoint_str) {
+  if (is.na(waypoint_str) || waypoint_str == "") {
+    return(NULL)
+  } else {
+    points <- str_split(waypoint_str, " \\| ")[[1]]
+    coords <- lapply(points, function(point) {
+      lat_lng <- str_split(point, ", ")[[1]]
+      lat <- as.numeric(lat_lng[1])
+      lng <- as.numeric(lat_lng[2])
+      return(c(lat, lng))
+    })
+    return(do.call(rbind, coords))
+  }
+}
+
+data$waypoints_parsed <- lapply(data$waypoints, parse_waypoints)
+
+activity_colors <- c(
+  "IN_PASSENGER_VEHICLE" = "blue",
+  "WALKING" = "green",
+  "IN_BUS" = "red",
+  "DRIVING" = "purple",
+  "BICYCLING" = "orange"
+)
+data$color <- activity_colors[data$activity_type]
+data$color[is.na(data$color)] <- "gray"
+
+ui <- fluidPage(
+  titlePanel("Dynamic Map"),
+  sidebarLayout(
+    sidebarPanel(
+      sliderInput(
+        "time_slider",
+        "Choose Time:",
+        min = min(data$start_time, na.rm = TRUE),
+        max = max(data$end_time, na.rm = TRUE),
+        value = min(data$start_time, na.rm = TRUE),
+        timeFormat = "%Y-%m-%d %H:%M:%S",
+        step = 60,
+        animate = animationOptions(interval = 1000, loop = TRUE)
+      )
+    ),
+    mainPanel(
+      leafletOutput("map", height = 600)
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      addLegend(
+        position = "bottomright",
+        colors = c("blue", "green", "red", "purple", "orange", "gray"),
+        labels = c("In Passenger Vehicle", "Walking", "In Bus", "Driving", "Bicycling", "Other"),
+        title = "Activity Type",
+        opacity = 0.7
+      )
+  })
+  
+  observe({
+    current_time <- input$time_slider
+    message("Current slider time: ", current_time, " tz: ", tz(current_time))
+    message("Data time range: ", 
+            "Start: ", min(data$start_time, na.rm = TRUE), 
+            " End: ", max(data$end_time, na.rm = TRUE))
+    message("data$start_time tz: ", tz(data$start_time))
+    
+    filtered_data <- data %>%
+      filter(!is.na(start_time)) %>%
+      filter(start_time <= current_time)
+    
+    message("Number of activities to display: ", nrow(filtered_data))
+    
+    leafletProxy("map") %>% clearShapes() %>% clearMarkers()
+    
+    for (i in 1:nrow(filtered_data)) {
+      row <- filtered_data[i, ]
+      
+      if (is.na(row$start_latitude) || is.na(row$start_longitude) ||
+          is.na(row$end_latitude) || is.na(row$end_longitude)) {
+        message("Skipping row with missing coordinates at index: ", i)
+        next
+      }
+      
+      start_point <- c(row$start_latitude, row$start_longitude)
+      end_point <- c(row$end_latitude, row$end_longitude)
+      
+      path_coords <- tryCatch({
+        if (!is.na(row$waypoints) && row$waypoints != "") {
+          waypoints <- parse_waypoints(row$waypoints)
+          if (!is.null(waypoints)) {
+            rbind(start_point, waypoints, end_point)
+          } else {
+            rbind(start_point, end_point)
+          }
+        } else {
+          rbind(start_point, end_point)
+        }
+      }, error = function(e) {
+        message("Error parsing waypoints at index: ", i, "; Error: ", e$message)
+        NULL
+      })
+      
+      if (is.null(path_coords) || any(is.na(path_coords))) {
+        message("Skipping row with invalid path coordinates at index: ", i)
+        next
+      }
+      
+      leafletProxy("map") %>%
+        addPolylines(
+          lng = path_coords[, 2],
+          lat = path_coords[, 1],
+          color = row$color,
+          weight = 4,
+          opacity = 0.7
+        ) %>%
+        addCircleMarkers(
+          lng = start_point[2],
+          lat = start_point[1],
+          radius = 5,
+          color = "blue",
+          fill = TRUE,
+          fillOpacity = 0.7,
+          popup = paste0("<b>Start Point</b><br>", row$start_time)
+        ) %>%
+        addCircleMarkers(
+          lng = end_point[2],
+          lat = end_point[1],
+          radius = 5,
+          color = "red",
+          fill = TRUE,
+          fillOpacity = 0.7,
+          popup = paste0("<b>End Point</b><br>", row$end_time)
+        )
+      
+      if (!is.na(row$parking_latitude) && !is.na(row$parking_longitude)) {
+        leafletProxy("map") %>%
+          addCircleMarkers(
+            lng = row$parking_longitude,
+            lat = row$parking_latitude,
+            radius = 4,
+            color = "orange",
+            fill = TRUE,
+            fillOpacity = 0.5,
+            popup = paste0(
+              "<b>Parking Location</b><br>",
+              "Time: ", row$parking_time
+            )
+          )
+      }
+    }
+  })
+}
+
+shinyApp(ui, server)
+
+
+```
+
+# Step 5: Exploratory Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(leaflet)
+library(geosphere)
+library(dbscan)
+
+data <- read.csv(paste(OurFilePath, "Activity_CleanedCSVFile/", "Activity_All_In_One.csv", sep=""), stringsAsFactors = FALSE)
+
+# Add time-related columns
+data <- data %>%
+  mutate(
+    duration = as.numeric(difftime(end_time, start_time, units = "mins")),
+    day = as.Date(start_time),
+    wday = wday(start_time, label = TRUE),
+    hour = hour(start_time)
+  )
+
+#---------------------
+# Basic statistics and correlation
+#---------------------
+num_vars <- data %>%
+  select(distance, parking_distance) %>%
+  na.omit()
+cor_matrix <- cor(num_vars)
+print("Correlation Matrix:")
+print(cor_matrix)
+
+#---------------------
+# Time analysis
+#---------------------
+# Daily statistics
+daily_stats <- data %>%
+  group_by(day) %>%
+  summarise(
+    total_activities = n(),
+    total_distance = sum(distance, na.rm = TRUE),
+    avg_duration = mean(duration, na.rm = TRUE)
+  )
+
+print("Daily Stats:")
+print(head(daily_stats))
+
+# Activities by weekday
+ggplot(data, aes(x = wday(start_time, label = TRUE, locale = "en_US.utf8"))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Number of Activities by Day of Week", x = "Day of Week", y = "Count") +
+  theme_minimal()
+
+# Activities by hour and type
+ggplot(data, aes(x = hour, fill = activity_type)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Activities by Hour", x = "Hour", y = "Count") +
+  theme_minimal()
+
+# Distribution of activity duration
+# ggplot(data, aes(x = duration)) +
+#   geom_histogram(binwidth = 10, fill = "darkgreen", color = "white") +
+#   labs(title = "Distribution of Activity Duration (minutes)", x = "Duration (min)", y = "Count")
+
+# Daily total distance over time
+ggplot(daily_stats, aes(x = day, y = total_distance)) +
+  geom_line(color = "blue") +
+  geom_point() +
+  labs(title = "Daily Total Distance Over Time", x = "Day", y = "Total Distance") +
+  theme_minimal()
+
+#---------------------
+# Geographic analysis (clustering end points)
+#---------------------
+coords <- data %>%
+  select(end_latitude, end_longitude) %>%
+  na.omit()
+
+coords_mat <- as.matrix(coords)
+db <- dbscan(coords_mat, eps = 0.001, minPts = 5)
+
+data$cluster <- NA
+data$cluster[!is.na(data$end_latitude) & !is.na(data$end_longitude)] <- db$cluster
+
+print("Cluster Count:")
+print(table(data$cluster))
+
+cluster_centers <- data %>%
+  filter(!is.na(cluster) & cluster != 0) %>%
+  group_by(cluster) %>%
+  summarise(
+    center_lat = mean(end_latitude, na.rm = TRUE),
+    center_lon = mean(end_longitude, na.rm = TRUE),
+    count = n()
+  )
+
+print("Cluster Centers:")
+print(cluster_centers)
+
+leaflet(data = cluster_centers) %>%
+  addTiles() %>%
+  addCircleMarkers(~center_lon, ~center_lat, radius = ~log(count+1)*3,
+                   popup = ~paste("Cluster:", cluster, "<br>", "Count:", count),
+                   color = "red", fillOpacity = 0.5)
+
+#---------------------
+# Advanced exploration
+#---------------------
+# Effect of activity type and confidence on distance
+ggplot(data, aes(x = activity_type, y = distance, fill = confidence)) +
+  geom_boxplot() +
+  labs(title = "Distance by Activity Type and Confidence", x = "Activity Type", y = "Distance") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # Rotate x-axis labels
+  facet_wrap(~confidence, scales = "free_x") # Adjust scale for each facet
+
+```

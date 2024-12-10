@@ -1,0 +1,328 @@
+---
+title: "475-575_FinalProject_HandleRecordsJSON"
+author: "Minzhang"
+date: "2024-10-26"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+
+# File Location
+
+```{r}
+# Put this .rmd file in the same folder with unziped FD01 and FD02
+# You can change these variables based on your file location and structure
+# To generate one by one
+
+# Name = "FD01"
+Name = "FD02"
+
+OurFilePath = paste(Name,"/Takeout/Location History/", sep="")
+NewCSVFilePath = paste(OurFilePath, "HandleRecorsJSON", sep="")
+
+if (!dir.exists(NewCSVFilePath)){
+  dir.create(NewCSVFilePath)
+}
+```
+
+# Step 1: Records Convert CSV
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+
+data <- fromJSON(paste(OurFilePath, "Records.json", sep=""))
+
+locations <- data$locations
+
+base_data <- locations %>%
+  mutate(
+    latitude = latitudeE7 / 1e7,
+    longitude = longitudeE7 / 1e7,
+    accuracy = accuracy,
+    source = source,
+    deviceTag = deviceTag,
+    timestamp = timestamp
+  ) %>%
+  select(latitude, longitude, accuracy, source, deviceTag, timestamp, activity)
+
+# use names_sep to handle problem
+expanded_data <- base_data %>%
+  unnest(activity, keep_empty = TRUE, names_sep = "_") %>%
+  unnest(activity_activity, keep_empty = TRUE, names_sep = "_") %>%
+  mutate(
+    activity_type = activity_activity_type,
+    confidence = activity_activity_confidence,
+    activity_timestamp = activity_timestamp
+  ) %>%
+  select(-starts_with("activity_activity"))
+
+write.csv(expanded_data, paste(NewCSVFilePath, "/Records.csv", sep=""), row.names = FALSE)
+print(paste("Extracted", nrow(expanded_data), "records to Records.csv")) 
+
+
+
+```
+
+
+# Step 2: Tidy Data
+
+```{r}
+library(dplyr)
+
+data <- read.csv(paste(NewCSVFilePath, "/Records.csv", sep=""), na.strings = "NA")
+
+# remove some activity_type
+valid_activity_types <- c("STILL", "UNKNOWN", "ON_FOOT", "ON_BICYCLE", 
+                          "IN_ROAD_VEHICLE", "IN_RAIL_VEHICLE")
+
+tidy_data <- data %>%
+  # only want confidence >= 50
+  filter(confidence >= 50 & !is.na(confidence)) %>%
+  mutate(activity_type = ifelse(activity_type %in% valid_activity_types, 
+                                activity_type, NA)) %>%
+  arrange(timestamp)
+
+head(tidy_data)
+
+write.csv(tidy_data, paste(NewCSVFilePath, "/CleanedRecords.csv", sep=""), row.names = FALSE)
+
+```
+
+# Step 3: Visualization
+
+```{r}
+library(shiny)
+library(dplyr)
+library(leaflet)
+library(lubridate)
+library(stringr)
+
+data <- read.csv(paste(NewCSVFilePath, "/CleanedRecords.csv", sep=""), stringsAsFactors = FALSE)
+
+data <- data %>%
+  mutate(
+    timestamp = ymd_hms(timestamp, tz = "UTC"),
+    date = as.Date(timestamp, tz = "UTC")
+  )
+
+data$activity_type[is.na(data$activity_type) | data$activity_type == ""] <- "UNKNOWN"
+
+activity_colors <- c(
+  "STILL" = "red",
+  "UNKNOWN" = "gray",
+  "ON_FOOT" = "orange",
+  "ON_BICYCLE" = "yellow",
+  "IN_ROAD_VEHICLE" = "green",
+  "IN_RAIL_VEHICLE" = "blue"
+) # to detect and ensure data is cleaned
+
+data$color <- activity_colors[data$activity_type]
+data$color[is.na(data$color)] <- "gray"
+
+ui <- fluidPage(
+  titlePanel("Dynamic Map"),
+  sidebarLayout(
+    sidebarPanel(
+      dateInput(
+        "date_input",
+        "Choose Date:",
+        value = min(data$date, na.rm = TRUE),
+        min = min(data$date, na.rm = TRUE),
+        max = max(data$date, na.rm = TRUE)
+      ),
+      sliderInput(
+        "time_slider",
+        "Choose Time:",
+        min = min(data$timestamp, na.rm = TRUE),
+        max = max(data$timestamp, na.rm = TRUE),
+        value = min(data$timestamp, na.rm = TRUE),
+        timeFormat = "%H:%M:%S",
+        step = 600,
+        animate = animationOptions(interval = 1000, loop = TRUE)
+      )
+    ),
+    mainPanel(
+      leafletOutput("map", height = 600)
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  observe({
+    selected_date <- input$date_input
+    date_data <- data %>% filter(date == selected_date)
+    if (nrow(date_data) > 0) {
+      updateSliderInput(
+        session,
+        "time_slider",
+        min = min(date_data$timestamp, na.rm = TRUE),
+        max = max(date_data$timestamp, na.rm = TRUE),
+        value = min(date_data$timestamp, na.rm = TRUE)
+      )
+    }
+  })
+
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addTiles() %>%
+      addLegend(
+        position = "bottomright",
+        colors = activity_colors,
+        labels = names(activity_colors),
+        title = "Type",
+        opacity = 0.7
+      )
+  })
+
+  observe({
+    selected_date <- input$date_input
+    current_time <- input$time_slider
+
+    filtered_data <- data %>%
+      filter(date == selected_date & timestamp <= current_time)
+
+    leafletProxy("map") %>% clearShapes() %>% clearMarkers()
+
+    if (nrow(filtered_data) >= 2) {
+      filtered_data <- filtered_data[order(filtered_data$timestamp), ]
+
+      latitudes <- filtered_data$latitude
+      longitudes <- filtered_data$longitude
+      colors <- filtered_data$color
+
+      for (i in 1:nrow(filtered_data)) {
+        leafletProxy("map") %>%
+          addPolylines(
+            lng = c(longitudes[i - 1], longitudes[i]),
+            lat = c(latitudes[i - 1], latitudes[i]),
+            color = colors[i],
+            weight = 2,
+            opacity = 0.7
+          ) %>%
+          addCircleMarkers(
+            lng = longitudes[i],
+            lat = latitudes[i],
+            radius = 4,
+            color = "black",
+            fill = TRUE,
+            fillOpacity = 0.7,
+            popup = paste0(
+              "<b>Time:</b>", filtered_data$timestamp[i], "<br>",
+              "<b>Activity:</b>", filtered_data$activity_type[i]
+            )
+          )
+      }
+    }
+  })
+}
+
+shinyApp(ui, server)
+
+
+
+
+```
+
+# Step 4: Exploratory Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+# Read the data
+data <- read.csv(paste(NewCSVFilePath, "/CleanedRecords.csv", sep=""), na.strings = "NA", stringsAsFactors = FALSE)
+
+# Ensure proper timestamp formatting
+data <- data %>%
+  mutate(
+    timestamp = ymd_hms(timestamp, tz = "UTC"),
+    activity_timestamp = ymd_hms(activity_timestamp, tz = "UTC", quiet = TRUE) # Handle NA values gracefully
+  )
+
+# -----------------------------------------------
+# 1. Basic Statistics
+# Check the dimensions of the data
+dim(data)
+
+# Count missing values for each column
+colSums(is.na(data))
+
+# Display summary statistics
+summary(data)
+
+# -----------------------------------------------
+# 2. Temporal Distribution Analysis
+# Determine the range of timestamps
+range(data$timestamp, na.rm = TRUE)
+
+# Count the number of records per day
+daily_records <- data %>%
+  mutate(date = as.Date(timestamp)) %>%
+  count(date)
+
+# Plot the number of records per day
+ggplot(daily_records, aes(x = date, y = n)) +
+  geom_line(color = "blue") +
+  labs(title = "Daily Record Counts", x = "Date", y = "Count") +
+  theme_minimal()
+
+# -----------------------------------------------
+# 3. Activity Type Analysis
+# Count the frequency of each activity type
+activity_counts <- data %>%
+  count(activity_type, sort = TRUE)
+
+# Plot the distribution of activity types
+ggplot(activity_counts, aes(x = reorder(activity_type, -n), y = n)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Activity Type Distribution", x = "Activity Type", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot the distribution of confidence values
+ggplot(data, aes(x = confidence)) +
+  geom_histogram(binwidth = 10, fill = "orange", color = "black") +
+  labs(title = "Confidence Distribution", x = "Confidence", y = "Frequency") +
+  theme_minimal()
+
+# -----------------------------------------------
+# 4. Geographic Distribution Analysis
+# Determine the range of latitude and longitude
+range(data$latitude, na.rm = TRUE)
+range(data$longitude, na.rm = TRUE)
+
+# Plot the geographic distribution of activities
+ggplot(data, aes(x = longitude, y = latitude, color = activity_type)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Geographic Distribution of Activities", x = "Longitude", y = "Latitude") +
+  theme_minimal()
+
+# -----------------------------------------------
+# 5. Device and Source Analysis
+# Count the number of records per device tag
+device_counts <- data %>%
+  count(deviceTag, sort = TRUE)
+
+# Plot the distribution of device tags
+ggplot(device_counts, aes(x = reorder(as.factor(deviceTag), -n), y = n)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  labs(title = "Device Tag Distribution", x = "Device Tag", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Count the number of records per source
+source_counts <- data %>%
+  count(source, sort = TRUE)
+
+# Plot the distribution of sources
+ggplot(source_counts, aes(x = reorder(source, -n), y = n)) +
+  geom_bar(stat = "identity", fill = "purple") +
+  labs(title = "Source Distribution", x = "Source", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
