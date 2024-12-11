@@ -14,7 +14,7 @@ library(leaflet.minicharts)
 ```{r}
 # Read GLH data for FD01
 # Read and preprocess the data files
-data_FD01 <- read.csv("/FD01/place_visit_data/FD01_place_visit.csv")
+data_FD01 <- read.csv("FD01/place_visit_data/FD01_place_visit.csv")
 data_FD01 <- data_FD01 %>%
   # Filter based on visit_confidence, drop all places with less than 50 percent confidence
   filter(visit_confidence >= 50) %>%  
@@ -28,7 +28,7 @@ data_FD01 <- data_FD01 %>%
   )
 
 # Read GLH data for FD02
-data_FD02 <- read.csv("/FD02/place_visit_data/FD02_place_visit.csv")
+data_FD02 <- read.csv("FD02/place_visit_data/FD02_place_visit.csv")
 data_FD02 <- data_FD02 %>%
   # Filter based on visit_confidence, drop all places with less than 50 percent confidence
   filter(visit_confidence >= 50) %>%
