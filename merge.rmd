@@ -8,7 +8,7 @@ library(readr)
 # Set the directory containing the CSV files
 # Change the FD01-2019 accordingly based on the user and the year
 # Special case for 2019, use FD01-2019 and FD02-2019 for each user. For all the other years, change FD0x-2019 to 20xxTotal
-path <- "/place_visit_month/2019/FD01-2019"  
+path <- "place_visit_month/2019/FD01-2019"  
 
 # Get a list of CSV files with the specified naming pattern
 csv_files <- list.files(path = path, pattern = "2019-\\d{2}\\.csv$", full.names = TRUE)
@@ -25,7 +25,7 @@ cat("Available files have been successfully merged.\n")
 ```{r}
 # Set the path where your CSV files are stored
 # change the FD02 to FD01 accordingly
-file_path <- "/FD02/place_visit_data/" 
+file_path <- "FD02/place_visit_data/" 
 
 # List all CSV files in the directory
 csv_files <- list.files(path = file_path, pattern = "_place_visit.csv$", full.names = TRUE)
